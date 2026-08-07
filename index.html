@@ -42,6 +42,18 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
   background: var(--alert-bg); color: var(--alert-ink); border: 1px solid var(--alert-line);
   border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; font-size: 13.5px;
 }
+.wx[hidden] { display: none; }
+.wx {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 9px 12px; margin-bottom: 12px; font-size: 13.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.wx .now { color: var(--ink); font-weight: 650; font-size: 14.5px; }
+.wx .advice { margin-left: auto; font-weight: 600; }
+.wx .advice.ok { color: var(--accent); }
+.wx .advice.warn { color: var(--alert-ink); }
+.wx .advice.bad { color: var(--late); }
 .card {
   background: var(--card); border: 1px solid var(--line); border-radius: 14px;
   padding: 14px 14px 6px; margin-bottom: 12px;
@@ -84,6 +96,7 @@ footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top
   <button id="refreshBtn" title="Refresh now">Refresh</button>
 </header>
 
+<div id="wx" class="wx" hidden></div>
 <div id="alerts"></div>
 <div id="board"><p class="notice">Loading…</p></div>
 
@@ -176,11 +189,13 @@ async function refresh() {
       state.etas[id] = ((etaResults[i][0] && etaResults[i][0].enRoute) || []).filter(e => e.routeID === ROUTE);
     });
     state.lastOk = Date.now();
+    state.offline = false;
   } catch (e) {
-    $('#board').insertAdjacentHTML('afterbegin', '<p class="notice">⚠️ Can’t reach Bloomington Transit — retrying…</p>');
+    state.offline = true;
   }
   $('#refreshBtn').textContent = 'Refresh';
   render();
+  if (state.offline) $('#board').insertAdjacentHTML('afterbegin', '<p class="notice">⚠️ Can’t reach Bloomington Transit — retrying…</p>');
   if (TRIPS.some(t => !(state.etas[t.board] || []).length)) loadSchedules();
 }
 
@@ -275,8 +290,53 @@ function renderAge() {
   el.textContent = `${stale ? '⚠️ stale · ' : ''}updated ${s} s ago`;
 }
 
+// —— Weather (Open-Meteo, free/no key) for the departure window ——
+const WX_URL = 'https://api.open-meteo.com/v1/forecast?latitude=39.169&longitude=-86.514'
+  + '&current=temperature_2m,weather_code&hourly=precipitation_probability,precipitation,weather_code'
+  + '&daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=2';
+let wxFetched = 0;
+const WMO = c =>
+  c === 0 ? ['☀️', 'Clear'] : c <= 2 ? ['🌤', 'Partly cloudy'] : c === 3 ? ['☁️', 'Cloudy']
+  : c <= 48 ? ['🌫', 'Fog'] : c <= 57 ? ['🌦', 'Drizzle'] : c <= 67 ? ['🌧', 'Rain']
+  : c <= 77 ? ['🌨', 'Snow'] : c <= 82 ? ['🌦', 'Showers'] : c <= 86 ? ['🌨', 'Snow showers']
+  : ['⛈', 'Thunderstorm'];
+const isSnow = c => (c >= 71 && c <= 77) || c === 85 || c === 86;
+
+async function loadWeather() {
+  try {
+    const r = await fetch(WX_URL);
+    const w = await r.json();
+    wxFetched = Date.now();
+    const [icon, label] = WMO(w.current.weather_code);
+    const lo = Math.round(w.daily.temperature_2m_min[0]), hi = Math.round(w.daily.temperature_2m_max[0]);
+    // departure window: this hour + next 2 (indexed off the API's own local clock)
+    const idx = Math.max(0, w.hourly.time.indexOf(w.current.time.slice(0, 13) + ':00'));
+    const win = [idx, idx + 1, idx + 2].filter(i => i < w.hourly.time.length);
+    let advice = '<span class="advice ok">✅ Good to go</span>';
+    const wetAt = win.find(i =>
+      w.hourly.precipitation_probability[i] >= 40 || w.hourly.precipitation[i] >= 0.3 || w.hourly.weather_code[i] >= 51);
+    if (wetAt != null) {
+      const at = w.hourly.time[wetAt].slice(11, 16);
+      const code = w.hourly.weather_code[wetAt];
+      const heavy = code >= 95 || code === 65 || code === 67 || code === 82 || w.hourly.precipitation[wetAt] >= 4;
+      advice = isSnow(code)
+        ? `<span class="advice warn">❄️ Snow around ${at} — allow extra time</span>`
+        : heavy
+        ? `<span class="advice bad">⛈ Heavy rain around ${at} — consider waiting</span>`
+        : `<span class="advice warn">☔ Rain likely around ${at} — bring an umbrella</span>`;
+    }
+    $('#wx').innerHTML = `<span class="now">${icon} ${Math.round(w.current.temperature_2m)}°</span>`
+      + `<span>${label}</span><span>${lo}–${hi}°C today</span>${advice}`;
+    $('#wx').hidden = false;
+  } catch { /* weather is best-effort; hide on failure */ $('#wx').hidden = true; }
+}
+
 $('#refreshBtn').addEventListener('click', refresh);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  refresh();
+  if (Date.now() - wxFetched > 15 * 60e3) loadWeather();
+});
 
 (async () => {
   try {
@@ -285,8 +345,10 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
     $('#board').innerHTML = '<p class="notice">⚠️ Can’t load route data — check your connection and reload.</p>';
     return;
   }
+  loadWeather();
   await refresh();
   setInterval(refresh, 20000);
+  setInterval(loadWeather, 15 * 60e3);
   setInterval(renderAge, 1000);
 })();
 </script>
