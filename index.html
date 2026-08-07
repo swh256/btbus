@@ -5,16 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0E7A5F">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Route 6">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🚌</text></svg>'>
 <title>Route 6 — Live Arrivals</title>
 <style>
 :root {
   --bg: #F4F6F4; --card: #FFFFFF; --ink: #17201F; --muted: #5C6B68;
   --line: #E2E7E3; --accent: #0E7A5F; --late: #C23434; --chip-ink: #FFFFFF;
+  --alert-bg: #FFF7E6; --alert-ink: #8A5B00; --alert-line: #F0DCB0;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #101413; --card: #181E1C; --ink: #E8EFEA; --muted: #93A39D;
     --line: #242C29; --accent: #4FCFA6; --late: #E06060;
+    --alert-bg: #2A2413; --alert-ink: #E8C878; --alert-line: #4A3F1E;
   }
 }
 * { box-sizing: border-box; margin: 0; }
@@ -27,9 +33,14 @@ body {
 header { display: flex; align-items: baseline; gap: 10px; padding: 6px 2px 14px; }
 header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
 #age { font-size: 12px; color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+#age.stale { color: var(--late); font-weight: 600; }
 #refreshBtn {
   border: 1px solid var(--line); background: var(--card); color: var(--accent);
   border-radius: 8px; font-size: 13px; padding: 4px 10px; cursor: pointer;
+}
+.alert {
+  background: var(--alert-bg); color: var(--alert-ink); border: 1px solid var(--alert-line);
+  border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; font-size: 13.5px;
 }
 .card {
   background: var(--card); border: 1px solid var(--line); border-radius: 14px;
@@ -42,6 +53,14 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
   display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
   padding: 10px 0; border-top: 1px solid var(--line);
 }
+.eta-row.missed { opacity: .45; }
+.pill {
+  display: inline-block; font-size: 11px; font-weight: 700; border-radius: 999px;
+  padding: 2px 8px; letter-spacing: .3px; text-transform: uppercase; vertical-align: 1px; margin-right: 4px;
+}
+.pill.go { background: var(--accent); color: var(--chip-ink); }
+.pill.wait { border: 1px solid var(--line); color: var(--muted); }
+.pill.missed { border: 1px solid var(--line); color: var(--muted); }
 .eta-mid .dir { font-size: 14px; font-weight: 550; }
 .eta-mid .meta { font-size: 12px; color: var(--muted); margin-top: 1px; }
 .eta-mid .late { color: var(--late); }
@@ -65,6 +84,7 @@ footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top
   <button id="refreshBtn" title="Refresh now">Refresh</button>
 </header>
 
+<div id="alerts"></div>
 <div id="board"><p class="notice">Loading…</p></div>
 
 <footer>Bloomington Transit Route 6 (Campus Shuttle) · auto-refreshes every 20 s</footer>
@@ -75,13 +95,15 @@ const API = 'https://bloomingtontransit.etaspot.net/service.php';
 const TOKEN = 'TESTING';
 const ROUTE = 6; // internal route id of "6 Campus Shuttle"
 const TRIPS = [
-  { icon: '🏫', label: 'To campus', board: 320, dest: 326, boardName: '10th & SR 45/46', destName: '10th & Forrest Ave' },
-  { icon: '🏠', label: 'Home',      board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad' },
+  { icon: '🏫', label: 'To campus', board: 320, dest: 326, boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10 },
+  { icon: '🏠', label: 'Home',      board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5 },
 ];
 const STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
+const GO_WINDOW = 2; // "leave now" when bus arrives within walkMin .. walkMin+2
 
 const $ = s => document.querySelector(s);
-const state = { stopById: new Map(), patterns: [], vehicles: [], etas: {}, lastOk: 0 };
+const state = { stopById: new Map(), patterns: [], vehicles: [], etas: {}, alerts: [], sched: null, lastOk: 0 };
+let schedLoading = false;
 
 async function call(service, params = '') {
   const r = await fetch(`${API}?service=${service}&token=${TOKEN}${params}`);
@@ -105,13 +127,51 @@ async function loadStatic() {
   state.stopById = new Map(cached.stops.map(s => [s.id, s]));
 }
 
+// Route-6 timetable rows for our boarding stops (first/last bus in the empty state).
+// get_schedules is ~4 MB, so fetch only on demand and keep a 7-day cache.
+const timeToMin = t => {
+  const m = /^(\d+):(\d+)(AM|PM)$/.exec(t);
+  if (!m) return null;
+  let h = +m[1] % 12; if (m[3] === 'PM') h += 12;
+  return h * 60 + +m[2];
+};
+async function loadSchedules() {
+  if (state.sched || schedLoading) return;
+  try { const c = JSON.parse(localStorage.bt6_sched || 'null'); if (c && Date.now() - c.ts < 7 * 24 * 3600e3) { state.sched = c.byStop; render(); return; } } catch {}
+  schedLoading = true;
+  try {
+    const rows = await call('get_schedules');
+    const byStop = {};
+    for (const r of rows) {
+      if (!STOP_IDS.includes(r.stationID)) continue;
+      if (String(r.scheduleName || '').split(' - ')[0].trim() !== String(ROUTE)) continue;
+      const min = timeToMin(r.stopTime);
+      if (min == null) continue;
+      (byStop[r.stationID] = byStop[r.stationID] || []).push({ d: String(r.weekdays || ''), t: r.stopTime, m: min });
+    }
+    state.sched = byStop;
+    try { localStorage.bt6_sched = JSON.stringify({ ts: Date.now(), byStop }); } catch {}
+  } catch (e) { /* schedule info is best-effort */ }
+  schedLoading = false;
+  render();
+}
+function todayServiceSpan(stopId) {
+  if (!state.sched) return null;
+  const day = new Date().getDay(); // 0=Sun
+  const c = day === 0 ? '7' : String(day);
+  const rows = (state.sched[stopId] || []).filter(r => r.d.includes(c)).sort((a, b) => a.m - b.m);
+  if (!rows.length) return { none: true };
+  return { first: rows[0].t, last: rows[rows.length - 1].t };
+}
+
 async function refresh() {
   $('#refreshBtn').innerHTML = '<span class="spin">⟳</span>';
   try {
-    const [vehicles, ...etaResults] = await Promise.all(
-      [call('get_vehicles')].concat(STOP_IDS.map(id => call('get_stop_etas', `&stopID=${id}`)))
+    const [vehicles, alerts, ...etaResults] = await Promise.all(
+      [call('get_vehicles'), call('get_service_announcements')].concat(STOP_IDS.map(id => call('get_stop_etas', `&stopID=${id}`)))
     );
     state.vehicles = vehicles;
+    state.alerts = Array.isArray(alerts) ? alerts : [];
     STOP_IDS.forEach((id, i) => {
       state.etas[id] = ((etaResults[i][0] && etaResults[i][0].enRoute) || []).filter(e => e.routeID === ROUTE);
     });
@@ -121,6 +181,7 @@ async function refresh() {
   }
   $('#refreshBtn').textContent = 'Refresh';
   render();
+  if (TRIPS.some(t => !(state.etas[t.board] || []).length)) loadSchedules();
 }
 
 const dist2 = (a, b, c, d) => (a - c) ** 2 + (b - d) ** 2;
@@ -144,34 +205,69 @@ function stopsAway(eta, stopId) {
   return n;
 }
 
+// Announcement schema is unobserved (feed was empty when built) — extract text defensively
+const alertText = a => {
+  if (typeof a === 'string') return a;
+  if (a && typeof a === 'object') {
+    for (const k of ['title', 'name', 'message', 'text', 'announcement', 'description']) {
+      if (typeof a[k] === 'string' && a[k].trim()) return a[k];
+    }
+    const strs = Object.values(a).filter(v => typeof v === 'string' && v.trim());
+    if (strs.length) return strs.join(' — ');
+  }
+  return '';
+};
+
 function render() {
+  $('#alerts').innerHTML = state.alerts.map(alertText).filter(Boolean)
+    .map(t => `<div class="alert">📢 ${t}</div>`).join('');
+
   $('#board').innerHTML = TRIPS.map(t => {
     const etas = (state.etas[t.board] || []).slice().sort((a, b) => a.minutes - b.minutes).slice(0, 3);
     const rows = etas.map(e => {
       const away = stopsAway(e, t.board);
-      const late = e.statuscolor && e.statuscolor.toUpperCase() !== '#000000' && e.schedule !== e.time;
-      // same vehicle's predicted arrival at the destination stop
+      const lateFlag = e.statuscolor && e.statuscolor.toUpperCase() !== '#000000' && e.schedule !== e.time;
       const destEta = (state.etas[t.dest] || []).find(d => String(d.equipmentID) === String(e.equipmentID) && d.minutes > e.minutes);
-      return `<div class="eta-row">
+      const slack = e.minutes - t.walkMin; // minutes to spare after walking
+      const status = slack < 0 ? 'missed' : slack <= GO_WINDOW ? 'go' : 'wait';
+      // the leave-now hint only makes sense on a near horizon
+      const pill = e.minutes > 90 ? '' : status === 'go' ? '<span class="pill go">Leave now</span>'
+        : status === 'wait' ? `<span class="pill wait">Leave in ~${slack} min</span>`
+        : '<span class="pill missed">Too late</span>';
+      return `<div class="eta-row ${status === 'missed' ? 'missed' : ''}">
         <div class="eta-mid">
-          <div class="dir">Board ${e.time}${away != null ? ` · ~${away} stops away` : ''}</div>
-          <div class="meta">${destEta ? `arrive ${t.destName} ~${destEta.time}` : `to ${t.destName}`}${late ? ` · <span class="late">late (sched ${e.schedule})</span>` : ''} · Bus ${e.equipmentID}</div>
+          <div class="dir">${pill} Board ${e.time}${away != null ? ` · ~${away} stop${away === 1 ? '' : 's'} away` : ''}</div>
+          <div class="meta">${destEta ? `arrive ${t.destName} ~${destEta.time}` : `to ${t.destName}`}${lateFlag ? ` · <span class="late">late (sched ${e.schedule})</span>` : ''}${e.equipmentID && e.equipmentID !== '-' ? ` · Bus ${e.equipmentID}` : ''}</div>
         </div>
         <div class="eta-min">${e.minutes <= 0 ? '<b class="now">Due</b>' : `<b>${e.minutes}</b><span>min</span>`}</div>
       </div>`;
     }).join('');
+    let empty = '';
+    if (!rows) {
+      const span = todayServiceSpan(t.board);
+      empty = `<div class="empty">${
+        !span ? 'No live arrivals right now.'
+        : span.none ? 'No Route 6 service today.'
+        : `No live arrivals · today's Route 6 at this stop: first ${span.first}, last ${span.last}.`
+      }</div>`;
+    }
     return `<div class="card">
       <div class="trip-head">
         <span class="trip-label">${t.icon} ${t.label}</span>
-        <span class="trip-sub">${t.boardName} → ${t.destName}</span>
+        <span class="trip-sub">${t.boardName} → ${t.destName} · walk ${t.walkMin} min</span>
       </div>
-      ${rows || '<div class="empty">No Route 6 arrivals right now (out of service hours?)</div>'}
+      ${rows || empty}
     </div>`;
   }).join('');
 }
 
 function renderAge() {
-  $('#age').textContent = state.lastOk ? `updated ${Math.round((Date.now() - state.lastOk) / 1000)} s ago` : '';
+  const el = $('#age');
+  if (!state.lastOk) { el.textContent = ''; return; }
+  const s = Math.round((Date.now() - state.lastOk) / 1000);
+  const stale = s > 60;
+  el.classList.toggle('stale', stale);
+  el.textContent = `${stale ? '⚠️ stale · ' : ''}updated ${s} s ago`;
 }
 
 $('#refreshBtn').addEventListener('click', refresh);
