@@ -87,7 +87,7 @@ footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top
 <div id="alerts"></div>
 <div id="board"><p class="notice">Loading…</p></div>
 
-<footer>Bloomington Transit Route 6 (Campus Shuttle) · auto-refreshes every 20 s</footer>
+<footer>Bloomington Transit · Route 6 Campus Shuttle · refreshes every 20 s</footer>
 
 <script>
 'use strict';
@@ -96,7 +96,7 @@ const TOKEN = 'TESTING';
 const ROUTE = 6; // internal route id of "6 Campus Shuttle"
 const TRIPS = [
   { icon: '🏫', label: 'To campus', board: 320, dest: 326, boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10 },
-  { icon: '🏠', label: 'Home',      board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5 },
+  { icon: '🏠', label: 'Back home', board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5 },
 ];
 const STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
 const GO_WINDOW = 2; // "leave now" when bus arrives within walkMin .. walkMin+2
@@ -177,7 +177,7 @@ async function refresh() {
     });
     state.lastOk = Date.now();
   } catch (e) {
-    $('#board').insertAdjacentHTML('afterbegin', `<p class="notice">⚠️ ${e.message} (will retry automatically)</p>`);
+    $('#board').insertAdjacentHTML('afterbegin', '<p class="notice">⚠️ Can’t reach Bloomington Transit — retrying…</p>');
   }
   $('#refreshBtn').textContent = 'Refresh';
   render();
@@ -234,10 +234,15 @@ function render() {
       const pill = e.minutes > 90 ? '' : status === 'go' ? '<span class="pill go">Leave now</span>'
         : status === 'wait' ? `<span class="pill wait">Leave in ~${slack} min</span>`
         : '<span class="pill missed">Too late</span>';
+      const meta = [
+        destEta ? `arrives ~${destEta.time}` : '',
+        lateFlag ? `<span class="late">late (sched ${e.schedule})</span>` : '',
+        e.equipmentID && e.equipmentID !== '-' ? `Bus ${e.equipmentID}` : '',
+      ].filter(Boolean).join(' · ');
       return `<div class="eta-row ${status === 'missed' ? 'missed' : ''}">
         <div class="eta-mid">
           <div class="dir">${pill} Board ${e.time}${away != null ? ` · ~${away} stop${away === 1 ? '' : 's'} away` : ''}</div>
-          <div class="meta">${destEta ? `arrive ${t.destName} ~${destEta.time}` : `to ${t.destName}`}${lateFlag ? ` · <span class="late">late (sched ${e.schedule})</span>` : ''}${e.equipmentID && e.equipmentID !== '-' ? ` · Bus ${e.equipmentID}` : ''}</div>
+          ${meta ? `<div class="meta">${meta}</div>` : ''}
         </div>
         <div class="eta-min">${e.minutes <= 0 ? '<b class="now">Due</b>' : `<b>${e.minutes}</b><span>min</span>`}</div>
       </div>`;
@@ -246,15 +251,15 @@ function render() {
     if (!rows) {
       const span = todayServiceSpan(t.board);
       empty = `<div class="empty">${
-        !span ? 'No live arrivals right now.'
+        !span ? 'No buses right now.'
         : span.none ? 'No Route 6 service today.'
-        : `No live arrivals · today's Route 6 at this stop: first ${span.first}, last ${span.last}.`
+        : `No buses right now · today: first ${span.first} · last ${span.last}`
       }</div>`;
     }
     return `<div class="card">
       <div class="trip-head">
         <span class="trip-label">${t.icon} ${t.label}</span>
-        <span class="trip-sub">${t.boardName} → ${t.destName} · walk ${t.walkMin} min</span>
+        <span class="trip-sub">${t.boardName} → ${t.destName} · ${t.walkMin} min walk</span>
       </div>
       ${rows || empty}
     </div>`;
@@ -277,7 +282,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
   try {
     await loadStatic();
   } catch (e) {
-    $('#board').innerHTML = `<p class="notice">⚠️ Could not load route data: ${e.message}</p>`;
+    $('#board').innerHTML = '<p class="notice">⚠️ Can’t load route data — check your connection and reload.</p>';
     return;
   }
   await refresh();
