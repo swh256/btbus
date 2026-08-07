@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0E7A5F">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Bloomington Bus — Live Arrivals</title>
+<title>Route 6 — Live Arrivals</title>
 <style>
 :root {
   --bg: #F4F6F4; --card: #FFFFFF; --ink: #17201F; --muted: #5C6B68;
@@ -35,45 +35,23 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
   background: var(--card); border: 1px solid var(--line); border-radius: 14px;
   padding: 14px 14px 6px; margin-bottom: 12px;
 }
-.stop-head { display: flex; align-items: flex-start; gap: 8px; padding-bottom: 4px; }
-.stop-name { font-weight: 650; font-size: 15px; }
-.stop-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.del {
-  margin-left: auto; border: 0; background: none; color: var(--muted);
-  font-size: 16px; cursor: pointer; padding: 0 2px; line-height: 1;
-}
+.trip-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 6px; }
+.trip-label { font-weight: 700; font-size: 16px; }
+.trip-sub { font-size: 12px; color: var(--muted); }
 .eta-row {
-  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
   padding: 10px 0; border-top: 1px solid var(--line);
-}
-.route-chip {
-  min-width: 34px; height: 34px; border-radius: 9px; color: var(--chip-ink);
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 15px; padding: 0 6px;
 }
 .eta-mid .dir { font-size: 14px; font-weight: 550; }
 .eta-mid .meta { font-size: 12px; color: var(--muted); margin-top: 1px; }
 .eta-mid .late { color: var(--late); }
 .eta-min { text-align: right; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
-.eta-min b { font-size: 26px; font-weight: 700; }
+.eta-min b { font-size: 28px; font-weight: 700; }
 .eta-min span { font-size: 12px; color: var(--muted); margin-left: 2px; }
 .eta-min .now { color: var(--accent); }
 .empty { padding: 12px 0 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
-.notice { text-align: center; color: var(--muted); font-size: 13px; padding: 18px 6px; }
-#search {
-  width: 100%; border: 1px solid var(--line); background: var(--card); color: var(--ink);
-  border-radius: 12px; padding: 11px 13px; font-size: 15px; outline: none;
-}
-#search:focus { border-color: var(--accent); }
-#results { margin-top: 8px; }
-.result {
-  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-  padding: 10px 12px; margin-bottom: 6px; color: var(--ink); font-size: 14px; cursor: pointer;
-}
-.result small { color: var(--muted); margin-left: auto; white-space: nowrap; }
+.notice { text-align: center; color: var(--muted); font-size: 13px; padding: 12px 6px; }
 footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top: 8px; }
-footer a { color: inherit; }
 @media (prefers-reduced-motion: no-preference) {
   .spin { display: inline-block; animation: r 1s linear infinite; }
   @keyframes r { to { transform: rotate(360deg); } }
@@ -82,31 +60,28 @@ footer a { color: inherit; }
 </head>
 <body>
 <header>
-  <h1>🚌 Bloomington Bus</h1>
+  <h1>🚌 Route 6</h1>
   <span id="age"></span>
   <button id="refreshBtn" title="Refresh now">Refresh</button>
 </header>
 
-<div id="board"></div>
+<div id="board"><p class="notice">Loading…</p></div>
 
-<div class="card" id="addCard">
-  <input id="search" type="search" placeholder="Search stops to pin (e.g. 3rd, Walmart, Kirkwood)" autocomplete="off">
-  <div id="results"></div>
-</div>
-
-<footer>Data from Bloomington Transit (ETA SPOT public API). Auto-refreshes every 20 s.</footer>
+<footer>Bloomington Transit Route 6 (Campus Shuttle) · auto-refreshes every 20 s</footer>
 
 <script>
 'use strict';
 const API = 'https://bloomingtontransit.etaspot.net/service.php';
 const TOKEN = 'TESTING';
-const $ = s => document.querySelector(s);
-const state = { stops: [], stopById: new Map(), routes: new Map(), patterns: [], routeColor: {}, vehicles: [], etas: {}, lastOk: 0 };
+const ROUTE = 6; // internal route id of "6 Campus Shuttle"
+const TRIPS = [
+  { icon: '🏫', label: 'To campus', board: 320, dest: 326, boardName: '10th & SR 45/46', destName: '10th & Forrest Ave' },
+  { icon: '🏠', label: 'Home',      board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad' },
+];
+const STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
 
-const favs = {
-  get: () => { try { return JSON.parse(localStorage.bt_favs || '[]'); } catch { return []; } },
-  set: v => localStorage.bt_favs = JSON.stringify(v),
-};
+const $ = s => document.querySelector(s);
+const state = { stopById: new Map(), patterns: [], vehicles: [], etas: {}, lastOk: 0 };
 
 async function call(service, params = '') {
   const r = await fetch(`${API}?service=${service}&token=${TOKEN}${params}`);
@@ -117,38 +92,29 @@ async function call(service, params = '') {
   return j[service];
 }
 
-// Static data (stops/routes/patterns), cached in localStorage for 24 h
+// Stop coordinates + route-6 patterns for the "stops away" estimate; cached 24 h
 async function loadStatic() {
   let cached = null;
-  try { cached = JSON.parse(localStorage.bt_static || 'null'); } catch {}
-  if (cached && Date.now() - cached.ts < 24 * 3600e3) return applyStatic(cached);
-  const [stops, routes, patterns] = await Promise.all([call('get_stops'), call('get_routes'), call('get_patterns')]);
-  const data = { ts: Date.now(), stops, routes, patterns };
-  try { localStorage.bt_static = JSON.stringify(data); } catch {}
-  applyStatic(data);
-}
-function applyStatic(d) {
-  state.patterns = d.patterns;
-  for (const p of d.patterns) for (const rid of p.routes) if (!(rid in state.routeColor)) state.routeColor[rid] = p.color;
-  for (const r of d.routes) state.routes.set(r.id, r);
-  const seen = new Map();
-  for (const s of d.stops) {
-    if (!seen.has(s.id)) { seen.set(s.id, { id: s.id, name: s.name, lat: s.lat, lng: s.lng, routes: new Set() }); }
-    seen.get(s.id).routes.add(s.rid);
+  try { cached = JSON.parse(localStorage.bt6_static || 'null'); } catch {}
+  if (!cached || Date.now() - cached.ts > 24 * 3600e3) {
+    const [stops, patterns] = await Promise.all([call('get_stops'), call('get_patterns')]);
+    cached = { ts: Date.now(), stops: stops.filter(s => s.rid === ROUTE), patterns: patterns.filter(p => p.routes.includes(ROUTE)) };
+    try { localStorage.bt6_static = JSON.stringify(cached); } catch {}
   }
-  state.stops = [...seen.values()];
-  state.stopById = new Map(state.stops.map(s => [s.id, s]));
+  state.patterns = cached.patterns;
+  state.stopById = new Map(cached.stops.map(s => [s.id, s]));
 }
 
-// Live data
 async function refresh() {
-  const ids = favs.get();
   $('#refreshBtn').innerHTML = '<span class="spin">⟳</span>';
   try {
-    const jobs = [call('get_vehicles')].concat(ids.map(id => call('get_stop_etas', `&stopID=${id}`)));
-    const [vehicles, ...etaResults] = await Promise.all(jobs);
+    const [vehicles, ...etaResults] = await Promise.all(
+      [call('get_vehicles')].concat(STOP_IDS.map(id => call('get_stop_etas', `&stopID=${id}`)))
+    );
     state.vehicles = vehicles;
-    ids.forEach((id, i) => { state.etas[id] = (etaResults[i][0] && etaResults[i][0].enRoute) || []; });
+    STOP_IDS.forEach((id, i) => {
+      state.etas[id] = ((etaResults[i][0] && etaResults[i][0].enRoute) || []).filter(e => e.routeID === ROUTE);
+    });
     state.lastOk = Date.now();
   } catch (e) {
     $('#board').insertAdjacentHTML('afterbegin', `<p class="notice">⚠️ ${e.message} (will retry automatically)</p>`);
@@ -158,17 +124,12 @@ async function refresh() {
 }
 
 const dist2 = (a, b, c, d) => (a - c) ** 2 + (b - d) ** 2;
-const DIR_ABBR = { Inbound: 'IB', Outbound: 'OB', Eastbound: 'EB', Westbound: 'WB', 'Towards Campus': 'TC', 'Leaving Campus': 'LC' };
 
-// Estimate "stops away": pick the pattern for this route/direction,
-// locate the vehicle's nearest stop index, diff against the target stop index
+// Estimate "stops away" along the route-6 pattern serving this stop
 function stopsAway(eta, stopId) {
   const veh = state.vehicles.find(v => String(v.equipmentID) === String(eta.equipmentID));
   if (!veh) return null;
-  const abbr = DIR_ABBR[eta.direction];
-  let pats = state.patterns.filter(p => p.routes.includes(eta.routeID) && p.stopIDs.includes(stopId));
-  if (abbr && pats.some(p => p.name.endsWith(abbr))) pats = pats.filter(p => p.name.endsWith(abbr));
-  const pat = pats[0];
+  const pat = state.patterns.find(p => p.stopIDs.includes(stopId));
   if (!pat) return null;
   let vIdx = 0, best = Infinity;
   pat.stopIDs.forEach((sid, i) => {
@@ -183,39 +144,28 @@ function stopsAway(eta, stopId) {
   return n;
 }
 
-// Rendering
 function render() {
-  const ids = favs.get();
-  const board = $('#board');
-  if (!ids.length) {
-    board.innerHTML = '<p class="notice">No pinned stops yet — search below and tap one to pin it.</p>';
-    return;
-  }
-  board.innerHTML = ids.map(id => {
-    const stop = state.stopById.get(id);
-    if (!stop) return '';
-    const routeChips = [...stop.routes].map(r => state.routes.get(r)?.abbr ?? r).join(' / ');
-    const etas = (state.etas[id] || []).slice().sort((a, b) => a.minutes - b.minutes).slice(0, 4);
+  $('#board').innerHTML = TRIPS.map(t => {
+    const etas = (state.etas[t.board] || []).slice().sort((a, b) => a.minutes - b.minutes).slice(0, 3);
     const rows = etas.map(e => {
-      const route = state.routes.get(e.routeID);
-      const color = state.routeColor[e.routeID] || 'var(--accent)';
-      const away = stopsAway(e, id);
+      const away = stopsAway(e, t.board);
       const late = e.statuscolor && e.statuscolor.toUpperCase() !== '#000000' && e.schedule !== e.time;
+      // same vehicle's predicted arrival at the destination stop
+      const destEta = (state.etas[t.dest] || []).find(d => String(d.equipmentID) === String(e.equipmentID) && d.minutes > e.minutes);
       return `<div class="eta-row">
-        <div class="route-chip" style="background:${color}">${route?.abbr ?? e.routeID}</div>
         <div class="eta-mid">
-          <div class="dir">${e.direction || ''}${away != null ? ` · ~${away} stops away` : ''}</div>
-          <div class="meta">ETA ${e.time}${late ? ` · <span class="late">late (sched ${e.schedule})</span>` : ''} · Bus ${e.equipmentID}</div>
+          <div class="dir">Board ${e.time}${away != null ? ` · ~${away} stops away` : ''}</div>
+          <div class="meta">${destEta ? `arrive ${t.destName} ~${destEta.time}` : `to ${t.destName}`}${late ? ` · <span class="late">late (sched ${e.schedule})</span>` : ''} · Bus ${e.equipmentID}</div>
         </div>
         <div class="eta-min">${e.minutes <= 0 ? '<b class="now">Due</b>' : `<b>${e.minutes}</b><span>min</span>`}</div>
       </div>`;
     }).join('');
     return `<div class="card">
-      <div class="stop-head">
-        <div><div class="stop-name">${stop.name}</div><div class="stop-sub">Routes ${routeChips} · Stop #${id}</div></div>
-        <button class="del" data-del="${id}" title="Remove">✕</button>
+      <div class="trip-head">
+        <span class="trip-label">${t.icon} ${t.label}</span>
+        <span class="trip-sub">${t.boardName} → ${t.destName}</span>
       </div>
-      ${rows || '<div class="empty">No upcoming arrivals (service may have ended for the day)</div>'}
+      ${rows || '<div class="empty">No Route 6 arrivals right now (out of service hours?)</div>'}
     </div>`;
   }).join('');
 }
@@ -224,33 +174,9 @@ function renderAge() {
   $('#age').textContent = state.lastOk ? `updated ${Math.round((Date.now() - state.lastOk) / 1000)} s ago` : '';
 }
 
-// Search / pinning
-$('#search').addEventListener('input', () => {
-  const q = $('#search').value.trim().toLowerCase();
-  const box = $('#results');
-  if (q.length < 2) { box.innerHTML = ''; return; }
-  const cur = new Set(favs.get());
-  const hits = state.stops.filter(s => s.name.toLowerCase().includes(q) && !cur.has(s.id)).slice(0, 8);
-  box.innerHTML = hits.map(s =>
-    `<button class="result" data-add="${s.id}">${s.name}<small>Routes ${[...s.routes].map(r => state.routes.get(r)?.abbr ?? r).join('/')}</small></button>`
-  ).join('') || '<p class="notice">No matching stops</p>';
-});
-document.addEventListener('click', e => {
-  const add = e.target.closest('[data-add]'), del = e.target.closest('[data-del]');
-  if (add) {
-    favs.set([...favs.get(), Number(add.dataset.add)]);
-    $('#search').value = ''; $('#results').innerHTML = '';
-    refresh();
-  }
-  if (del) {
-    favs.set(favs.get().filter(x => x !== Number(del.dataset.del)));
-    render();
-  }
-});
 $('#refreshBtn').addEventListener('click', refresh);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
-// Boot
 (async () => {
   try {
     await loadStatic();
