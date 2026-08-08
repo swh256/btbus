@@ -61,6 +61,7 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
 .trip-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 6px; }
 .trip-label { font-weight: 700; font-size: 16px; }
 .trip-sub { font-size: 12px; color: var(--muted); }
+.trip-sub .soon { color: var(--alert-ink); font-weight: 650; }
 .eta-row {
   display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
   padding: 10px 0; border-top: 1px solid var(--line);
@@ -109,7 +110,7 @@ const TOKEN = 'TESTING';
 const ROUTE = 6; // internal route id of "6 Campus Shuttle"
 const TRIPS = [
   { icon: '🏫', label: 'To campus', board: 320, dest: 326, boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10 },
-  { icon: '🏠', label: 'Back home', board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5 },
+  { icon: '🏠', label: 'Back home', board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5, showLast: true },
 ];
 const STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
 const GO_WINDOW = 2; // "leave now" when bus arrives within walkMin .. walkMin+2
@@ -174,7 +175,7 @@ function todayServiceSpan(stopId) {
   const c = day === 0 ? '7' : String(day);
   const rows = (state.sched[stopId] || []).filter(r => r.d.includes(c)).sort((a, b) => a.m - b.m);
   if (!rows.length) return { none: true };
-  return { first: rows[0].t, last: rows[rows.length - 1].t };
+  return { first: rows[0].t, last: rows[rows.length - 1].t, lastM: rows[rows.length - 1].m };
 }
 
 async function refresh() {
@@ -271,10 +272,19 @@ function render() {
         : `No buses right now · today: first ${span.first} · last ${span.last}`
       }</div>`;
     }
+    let lastTag = '';
+    if (t.showLast) {
+      const span = todayServiceSpan(t.board);
+      if (span && !span.none) {
+        const now = new Date(); const nowM = now.getHours() * 60 + now.getMinutes();
+        const soon = span.lastM - nowM > 0 && span.lastM - nowM <= 60;
+        lastTag = ` · <span class="${soon ? 'soon' : ''}">last ${span.last}</span>`;
+      }
+    }
     return `<div class="card">
       <div class="trip-head">
         <span class="trip-label">${t.icon} ${t.label}</span>
-        <span class="trip-sub">${t.boardName} → ${t.destName} · ${t.walkMin} min walk</span>
+        <span class="trip-sub">${t.boardName} → ${t.destName} · ${t.walkMin} min walk${lastTag}</span>
       </div>
       ${rows || empty}
     </div>`;
@@ -346,6 +356,7 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   loadWeather();
+  loadSchedules(); // timetable also feeds the always-on "last bus" tag
   await refresh();
   setInterval(refresh, 20000);
   setInterval(loadWeather, 15 * 60e3);
