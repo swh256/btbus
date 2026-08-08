@@ -92,6 +92,12 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
 .eta-min span { font-size: 12px; color: var(--muted); margin-left: 2px; }
 .eta-min .now { color: var(--accent); }
 .empty { padding: 12px 0 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+#mapCard { padding-bottom: 12px; }
+#map { display: block; width: 100%; height: auto; margin-top: 4px; }
+.map-stop { fill: var(--muted); opacity: .4; }
+.map-mystop { fill: var(--card); stroke: var(--ink); stroke-width: 2; }
+.map-label { fill: var(--muted); font-size: 11px; font-weight: 600; }
+.map-bus text { font-size: 12px; }
 .notice { text-align: center; color: var(--muted); font-size: 13px; padding: 12px 6px; }
 footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top: 8px; }
 @media (prefers-reduced-motion: no-preference) {
@@ -110,6 +116,14 @@ footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top
 <div id="wx" class="wx" hidden></div>
 <div id="alerts" aria-live="polite"></div>
 <div id="board"><p class="notice">Loading…</p></div>
+
+<div class="card" id="mapCard" hidden>
+  <div class="trip-head">
+    <h2 class="trip-label">🗺️ Live map</h2>
+    <span class="trip-sub" id="mapSub"></span>
+  </div>
+  <svg id="map" role="img" aria-label="Route 6 live vehicle map"></svg>
+</div>
 
 <footer>Bloomington Transit · Route 6 Campus Shuttle · refreshes every 20 s</footer>
 
@@ -301,6 +315,81 @@ function stopsAway(eta, stopId) {
   return n >= 1 ? n : null;
 }
 
+// —— Live map: route geometry from the patterns' encoded polylines, ——
+// —— vehicle dots re-drawn from the same get_vehicles poll. No tiles. ——
+let mapBuilt = false, mapProj = null;
+function decLine(str) { // standard Google encoded-polyline decoder
+  let i = 0, lat = 0, lng = 0; const pts = [];
+  while (i < str.length) {
+    for (const which of [0, 1]) {
+      let shift = 0, result = 0, b;
+      do { b = str.charCodeAt(i++) - 63; result |= (b & 31) << shift; shift += 5; } while (b >= 32);
+      const d = (result & 1) ? ~(result >> 1) : (result >> 1);
+      if (which === 0) lat += d; else lng += d;
+    }
+    pts.push([lat / 1e5, lng / 1e5]);
+  }
+  return pts;
+}
+const safeColor = c => /^#[0-9a-fA-F]{3,8}$/.test(String(c)) ? c : 'var(--accent)';
+function buildMap() {
+  const pats = state.patterns.filter(p => typeof p.encLine === 'string' && p.encLine.length > 1);
+  if (!pats.length) return;
+  const lines = pats.map(p => ({ p, pts: decLine(p.encLine) }));
+  const all = lines.flatMap(l => l.pts);
+  if (all.length < 2) return;
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+  for (const [la, ln] of all) {
+    if (la < minLat) minLat = la; if (la > maxLat) maxLat = la;
+    if (ln < minLng) minLng = ln; if (ln > maxLng) maxLng = ln;
+  }
+  const cos = Math.cos((minLat + maxLat) / 2 * Math.PI / 180);
+  const W = 400, PAD = 16;
+  const k = (maxLng - minLng) * cos > 0 ? W / ((maxLng - minLng) * cos) : 1;
+  const H = Math.max(120, (maxLat - minLat) * k);
+  mapProj = (la, ln) => [PAD + (ln - minLng) * cos * k, PAD + (maxLat - la) * k];
+  const svg = $('#map');
+  svg.setAttribute('viewBox', `0 0 ${(W + 2 * PAD).toFixed(0)} ${(H + 2 * PAD).toFixed(0)}`);
+  let html = '';
+  lines.forEach(({ p, pts }, i) => {
+    const d = pts.map(([la, ln], j) => (j ? 'L' : 'M') + mapProj(la, ln).map(n => n.toFixed(1)).join(' ')).join('');
+    html += `<path d="${d}" fill="none" stroke="${safeColor(p.color)}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="${i === 0 ? 0.8 : 0.35}"/>`;
+  });
+  for (const s of state.stopById.values()) {
+    const [x, y] = mapProj(s.lat, s.lng);
+    html += `<circle class="map-stop" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5"/>`;
+  }
+  for (const id of STOP_IDS) {
+    const s = state.stopById.get(Number(id));
+    if (!s) continue;
+    const [x, y] = mapProj(s.lat, s.lng);
+    html += `<circle class="map-mystop" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5"/>`;
+  }
+  const home = state.stopById.get(320), campus = state.stopById.get(326);
+  if (home) { const [x, y] = mapProj(home.lat, home.lng); html += `<text class="map-label" x="${(x + 4).toFixed(1)}" y="${(y - 9).toFixed(1)}">Home</text>`; }
+  if (campus) { const [x, y] = mapProj(campus.lat, campus.lng); html += `<text class="map-label" x="${(x - 4).toFixed(1)}" y="${(y - 9).toFixed(1)}" text-anchor="end">Luddy</text>`; }
+  html += '<g id="busLayer"></g>';
+  svg.innerHTML = html;
+  $('#mapCard').hidden = false;
+  mapBuilt = true;
+}
+function drawBuses() {
+  if (!mapBuilt || !mapProj) return;
+  const box = $('#map').viewBox.baseVal;
+  const buses = state.vehicles.filter(v => Number(v.routeID) === ROUTE);
+  $('#busLayer').innerHTML = buses.map(v => {
+    const [x, y] = mapProj(Number(v.lat), Number(v.lng));
+    if (x < -20 || y < -20 || x > box.width + 20 || y > box.height + 20) return ''; // off-route (depot etc.)
+    const col = safeColor((state.patterns.find(p => Number(p.id) === Number(v.patternID)) || {}).color);
+    return `<g class="map-bus" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">`
+      + `<circle r="8.5" fill="${col}" stroke="var(--card)" stroke-width="2"/>`
+      + `<text text-anchor="middle" dy="4">🚌</text></g>`;
+  }).join('');
+  $('#mapSub').textContent = buses.length
+    ? `${buses.length} bus${buses.length > 1 ? 'es' : ''} live · dots = stops, rings = your stops`
+    : 'no buses on the road right now';
+}
+
 // Announcement schema is unobserved (feed was empty when built) — extract text
 // defensively; everything API-sourced is HTML-escaped before rendering.
 const alertText = a => {
@@ -382,6 +471,9 @@ function render() {
       ${rows || empty}
     </div>`;
   }).join('');
+
+  if (!mapBuilt && state.patterns.length) buildMap();
+  drawBuses();
 }
 
 function safeRender() {
