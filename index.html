@@ -3,10 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0E7A5F">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#F4F6F4">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101413">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Route 6">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🚌</text></svg>'>
 <title>Route 6 — Live Arrivals</title>
@@ -14,12 +16,14 @@
 :root {
   --bg: #F4F6F4; --card: #FFFFFF; --ink: #17201F; --muted: #5C6B68;
   --line: #E2E7E3; --accent: #0E7A5F; --late: #C23434; --chip-ink: #FFFFFF;
+  --go-ink: #FFFFFF;
   --alert-bg: #FFF7E6; --alert-ink: #8A5B00; --alert-line: #F0DCB0;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #101413; --card: #181E1C; --ink: #E8EFEA; --muted: #93A39D;
     --line: #242C29; --accent: #4FCFA6; --late: #E06060;
+    --go-ink: #0E2A21;
     --alert-bg: #2A2413; --alert-ink: #E8C878; --alert-line: #4A3F1E;
   }
 }
@@ -37,6 +41,7 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
 #refreshBtn {
   border: 1px solid var(--line); background: var(--card); color: var(--accent);
   border-radius: 8px; font-size: 13px; padding: 4px 10px; cursor: pointer;
+  min-width: 68px; text-align: center;
 }
 .alert {
   background: var(--alert-bg); color: var(--alert-ink); border: 1px solid var(--alert-line);
@@ -51,6 +56,9 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
 }
 .wx .now { color: var(--ink); font-weight: 650; font-size: 14.5px; }
 .wx .advice { margin-left: auto; font-weight: 600; }
+@media (max-width: 430px) {
+  .wx .advice { margin-left: 0; flex-basis: 100%; }
+}
 .wx .advice.ok { color: var(--accent); }
 .wx .advice.warn { color: var(--alert-ink); }
 .wx .advice.bad { color: var(--late); }
@@ -58,7 +66,7 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
   background: var(--card); border: 1px solid var(--line); border-radius: 14px;
   padding: 14px 14px 6px; margin-bottom: 12px;
 }
-.trip-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 6px; }
+.trip-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 6px; flex-wrap: wrap; }
 .trip-label { font-weight: 700; font-size: 16px; }
 .trip-sub { font-size: 12px; color: var(--muted); }
 .trip-sub .soon { color: var(--alert-ink); font-weight: 650; }
@@ -66,12 +74,14 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
   display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
   padding: 10px 0; border-top: 1px solid var(--line);
 }
-.eta-row.missed { opacity: .45; }
+/* missed rows: dim only the numeral (keeps text at full contrast) */
+.eta-row.missed .eta-min b { color: var(--muted); }
+.eta-row.missed .dir { color: var(--muted); font-weight: 500; }
 .pill {
   display: inline-block; font-size: 11px; font-weight: 700; border-radius: 999px;
   padding: 2px 8px; letter-spacing: .3px; text-transform: uppercase; vertical-align: 1px; margin-right: 4px;
 }
-.pill.go { background: var(--accent); color: var(--chip-ink); }
+.pill.go { background: var(--accent); color: var(--go-ink); }
 .pill.wait { border: 1px solid var(--line); color: var(--muted); }
 .pill.missed { border: 1px solid var(--line); color: var(--muted); }
 .eta-mid .dir { font-size: 14px; font-weight: 550; }
@@ -98,7 +108,7 @@ footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top
 </header>
 
 <div id="wx" class="wx" hidden></div>
-<div id="alerts"></div>
+<div id="alerts" aria-live="polite"></div>
 <div id="board"><p class="notice">Loading…</p></div>
 
 <footer>Bloomington Transit · Route 6 Campus Shuttle · refreshes every 20 s</footer>
@@ -113,36 +123,74 @@ const TRIPS = [
   { icon: '🏠', label: 'Back home', board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5, showLast: true },
 ];
 const STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
+const BOARD_IDS = new Set(TRIPS.map(t => t.board));
 const GO_WINDOW = 2; // "leave now" when bus arrives within walkMin .. walkMin+2
 
 const $ = s => document.querySelector(s);
-const state = { stopById: new Map(), patterns: [], vehicles: [], etas: {}, alerts: [], sched: null, lastOk: 0 };
-let schedLoading = false;
+const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const state = { stopById: new Map(), patterns: [], vehicles: [], etas: {}, alerts: [], sched: null, lastOk: 0, offline: false };
+let feedVer = null;       // ETA SPOT dataset version, used to invalidate caches on service changes
+let refreshing = false;
+let schedBusy = false, schedRetryAt = 0, schedDelay = 10 * 60e3;
+let staticNextTry = 0;
+let lastAlertsHTML = '';
 
 async function call(service, params = '') {
-  const r = await fetch(`${API}?service=${service}&token=${TOKEN}${params}`);
-  const text = await r.text();
-  let j;
-  try { j = JSON.parse(text); } catch { throw new Error(`${service}: unexpected API response`); }
-  if (!(service in j)) throw new Error(`${service}: missing data in response`);
-  return j[service];
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const r = await fetch(`${API}?service=${service}&token=${TOKEN}${params}`, { signal: ctl.signal });
+    const text = await r.text();
+    let j;
+    try { j = JSON.parse(text); } catch { throw new Error(`${service}: unexpected API response`); }
+    if (!(service in j)) throw new Error(`${service}: missing data in response`);
+    return j[service];
+  } finally { clearTimeout(timer); }
 }
 
-// Stop coordinates + route-6 patterns for the "stops away" estimate; cached 24 h
+const readCache = key => {
+  try {
+    const c = JSON.parse(localStorage.getItem(key) || 'null');
+    return c && typeof c.ts === 'number' ? c : null;
+  } catch { return null; }
+};
+const cacheFresh = (c, ttl) => !!c && (feedVer && c.ver ? c.ver === feedVer : Date.now() - c.ts < ttl);
+
+async function getVersion() {
+  try {
+    const v = await call('get_version_id');
+    return v && v.versionID != null ? String(v.versionID) : null;
+  } catch { return null; }
+}
+
+// Stop coordinates + route-6 patterns for the "stops away" estimate.
+// Cache is keyed to the feed version when known, else a 24 h TTL. Failure is
+// never fatal: live ETAs work without static data (stops-away just disappears),
+// and refresh() retries this in the background once the network is back.
 async function loadStatic() {
-  let cached = null;
-  try { cached = JSON.parse(localStorage.bt6_static || 'null'); } catch {}
-  if (!cached || Date.now() - cached.ts > 24 * 3600e3) {
-    const [stops, patterns] = await Promise.all([call('get_stops'), call('get_patterns')]);
-    cached = { ts: Date.now(), stops: stops.filter(s => s.rid === ROUTE), patterns: patterns.filter(p => p.routes.includes(ROUTE)) };
-    try { localStorage.bt6_static = JSON.stringify(cached); } catch {}
+  let c = readCache('bt6_static');
+  const valid = c && Array.isArray(c.stops) && Array.isArray(c.patterns);
+  if (!valid || !cacheFresh(c, 24 * 3600e3)) {
+    try {
+      const [stops, patterns] = await Promise.all([call('get_stops'), call('get_patterns')]);
+      c = {
+        ts: Date.now(), ver: feedVer,
+        stops: stops.filter(s => Number(s.rid) === ROUTE),
+        patterns: patterns.filter(p => (p.routes || []).some(r => Number(r) === ROUTE))
+          .map(p => ({ ...p, stopIDs: (p.stopIDs || []).map(Number) })),
+      };
+      try { localStorage.setItem('bt6_static', JSON.stringify(c)); } catch {}
+    } catch {
+      if (!valid) c = { stops: [], patterns: [] }; // degrade: board still works
+    }
   }
-  state.patterns = cached.patterns;
-  state.stopById = new Map(cached.stops.map(s => [s.id, s]));
+  state.patterns = (c.patterns || []).filter(p => Array.isArray(p.stopIDs));
+  state.stopById = new Map((c.stops || []).map(s => [Number(s.id), s]));
 }
 
-// Route-6 timetable rows for our boarding stops (first/last bus in the empty state).
-// get_schedules is ~4 MB, so fetch only on demand and keep a 7-day cache.
+// Route-6 timetable rows for our stops (first/last bus). ~4 MB, so: fetched only
+// when needed, cached keyed to feed version (7-day TTL fallback), an empty parse
+// is never cached, and failures back off exponentially (10 min → … → 6 h).
 const timeToMin = t => {
   const m = /^(\d+):(\d+)(AM|PM)$/.exec(t);
   if (!m) return null;
@@ -150,24 +198,31 @@ const timeToMin = t => {
   return h * 60 + +m[2];
 };
 async function loadSchedules() {
-  if (state.sched || schedLoading) return;
-  try { const c = JSON.parse(localStorage.bt6_sched || 'null'); if (c && Date.now() - c.ts < 7 * 24 * 3600e3) { state.sched = c.byStop; render(); return; } } catch {}
-  schedLoading = true;
+  if (state.sched || schedBusy || Date.now() < schedRetryAt) return;
+  const c = readCache('bt6_sched');
+  if (c && c.byStop && Object.keys(c.byStop).length && cacheFresh(c, 7 * 24 * 3600e3)) {
+    state.sched = c.byStop; safeRender(); return;
+  }
+  schedBusy = true;
+  const backoff = () => { schedRetryAt = Date.now() + schedDelay; schedDelay = Math.min(schedDelay * 2, 6 * 3600e3); };
   try {
     const rows = await call('get_schedules');
     const byStop = {};
     for (const r of rows) {
-      if (!STOP_IDS.includes(r.stationID)) continue;
+      if (!STOP_IDS.includes(Number(r.stationID))) continue;
       if (String(r.scheduleName || '').split(' - ')[0].trim() !== String(ROUTE)) continue;
       const min = timeToMin(r.stopTime);
       if (min == null) continue;
       (byStop[r.stationID] = byStop[r.stationID] || []).push({ d: String(r.weekdays || ''), t: r.stopTime, m: min });
     }
-    state.sched = byStop;
-    try { localStorage.bt6_sched = JSON.stringify({ ts: Date.now(), byStop }); } catch {}
-  } catch (e) { /* schedule info is best-effort */ }
-  schedLoading = false;
-  render();
+    if (Object.keys(byStop).length) {
+      state.sched = byStop;
+      schedDelay = 10 * 60e3;
+      try { localStorage.setItem('bt6_sched', JSON.stringify({ ts: Date.now(), ver: feedVer, byStop })); } catch {}
+    } else backoff(); // odd/empty parse: cache nothing, retry with backoff
+  } catch { backoff(); }
+  schedBusy = false;
+  safeRender();
 }
 function todayServiceSpan(stopId) {
   if (!state.sched) return null;
@@ -178,50 +233,76 @@ function todayServiceSpan(stopId) {
   return { first: rows[0].t, last: rows[rows.length - 1].t, lastM: rows[rows.length - 1].m };
 }
 
+// Partial results are kept: each response updates its own slice of state; the
+// staleness clock and offline banner key off the BOARDING stops (the ones that
+// matter); try/finally guarantees the in-flight lock always releases.
 async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
   $('#refreshBtn').innerHTML = '<span class="spin">⟳</span>';
   try {
-    const [vehicles, alerts, ...etaResults] = await Promise.all(
-      [call('get_vehicles'), call('get_service_announcements')].concat(STOP_IDS.map(id => call('get_stop_etas', `&stopID=${id}`)))
+    const results = await Promise.allSettled(
+      [call('get_vehicles'), call('get_service_announcements')]
+        .concat(STOP_IDS.map(id => call('get_stop_etas', `&stopID=${id}`)))
     );
-    state.vehicles = vehicles;
-    state.alerts = Array.isArray(alerts) ? alerts : [];
+    const [veh, al, ...etaResults] = results;
+    if (veh.status === 'fulfilled' && Array.isArray(veh.value)) state.vehicles = veh.value;
+    if (al.status === 'fulfilled' && Array.isArray(al.value)) state.alerts = al.value;
+    let boardOk = false;
     STOP_IDS.forEach((id, i) => {
-      state.etas[id] = ((etaResults[i][0] && etaResults[i][0].enRoute) || []).filter(e => e.routeID === ROUTE);
+      const r = etaResults[i];
+      if (r.status !== 'fulfilled' || !Array.isArray(r.value)) return;
+      const en = r.value[0] && r.value[0].enRoute;
+      state.etas[id] = (Array.isArray(en) ? en : []).filter(e => Number(e.routeID) === ROUTE);
+      if (BOARD_IDS.has(id)) boardOk = true;
     });
-    state.lastOk = Date.now();
-    state.offline = false;
-  } catch (e) {
-    state.offline = true;
+    state.offline = !boardOk;
+    const rendered = safeRender();
+    if (rendered && boardOk) state.lastOk = Date.now();
+    if (state.offline) $('#board').insertAdjacentHTML('afterbegin', '<p class="notice">⚠️ Can’t reach Bloomington Transit — retrying…</p>');
+    if (TRIPS.some(t => !(state.etas[t.board] || []).length)) loadSchedules();
+    // static data / feed version recovery when boot happened offline
+    if (boardOk && !state.patterns.length && Date.now() > staticNextTry) {
+      staticNextTry = Date.now() + 5 * 60e3;
+      getVersion().then(v => { if (v) feedVer = v; return loadStatic(); }).then(safeRender).catch(() => {});
+    }
+  } finally {
+    refreshing = false;
+    $('#refreshBtn').textContent = 'Refresh';
   }
-  $('#refreshBtn').textContent = 'Refresh';
-  render();
-  if (state.offline) $('#board').insertAdjacentHTML('afterbegin', '<p class="notice">⚠️ Can’t reach Bloomington Transit — retrying…</p>');
-  if (TRIPS.some(t => !(state.etas[t.board] || []).length)) loadSchedules();
 }
 
 const dist2 = (a, b, c, d) => (a - c) ** 2 + (b - d) ** 2;
 
-// Estimate "stops away" along the route-6 pattern serving this stop
+// "Stops away" along the pattern THE VEHICLE is running (patternID), using its
+// own nextStopID when present. Omitted when the bus is on the opposite
+// direction of its loop or already past the stop — no number beats a wrong one.
 function stopsAway(eta, stopId) {
-  const veh = state.vehicles.find(v => String(v.equipmentID) === String(eta.equipmentID));
+  const eid = String(eta.equipmentID || '');
+  if (!eid || eid === '-') return null;
+  const veh = state.vehicles.find(v => String(v.equipmentID) === eid);
   if (!veh) return null;
-  const pat = state.patterns.find(p => p.stopIDs.includes(stopId));
-  if (!pat) return null;
-  let vIdx = 0, best = Infinity;
-  pat.stopIDs.forEach((sid, i) => {
-    const s = state.stopById.get(sid);
-    if (!s) return;
-    const d = dist2(s.lat, s.lng, veh.lat, veh.lng);
-    if (d < best) { best = d; vIdx = i; }
-  });
-  const tIdx = pat.stopIDs.indexOf(stopId);
-  let n = tIdx - vIdx;
-  if (n < 0) n += pat.stopIDs.length;
-  return n;
+  const sid = Number(stopId);
+  const pat = state.patterns.find(p => Number(p.id) === Number(veh.patternID));
+  if (!pat || !pat.stopIDs.includes(sid)) return null;
+  const tIdx = pat.stopIDs.indexOf(sid);
+  let vIdx = veh.nextStopID ? pat.stopIDs.indexOf(Number(veh.nextStopID)) : -1;
+  if (vIdx < 0) {
+    let best = Infinity;
+    pat.stopIDs.forEach((s2, i) => {
+      const s = state.stopById.get(s2);
+      if (!s) return;
+      const d = dist2(s.lat, s.lng, veh.lat, veh.lng);
+      if (d < best) { best = d; vIdx = i; }
+    });
+  }
+  if (vIdx < 0) return null;
+  const n = tIdx - vIdx;
+  return n >= 1 ? n : null;
 }
 
-// Announcement schema is unobserved (feed was empty when built) — extract text defensively
+// Announcement schema is unobserved (feed was empty when built) — extract text
+// defensively; everything API-sourced is HTML-escaped before rendering.
 const alertText = a => {
   if (typeof a === 'string') return a;
   if (a && typeof a === 'object') {
@@ -235,32 +316,44 @@ const alertText = a => {
 };
 
 function render() {
-  $('#alerts').innerHTML = state.alerts.map(alertText).filter(Boolean)
-    .map(t => `<div class="alert">📢 ${t}</div>`).join('');
+  // only touch the aria-live region when content actually changed
+  const alertsHTML = state.alerts.map(alertText).filter(Boolean)
+    .map(t => `<div class="alert">📢 ${esc(t)}</div>`).join('');
+  if (alertsHTML !== lastAlertsHTML) { $('#alerts').innerHTML = alertsHTML; lastAlertsHTML = alertsHTML; }
 
   $('#board').innerHTML = TRIPS.map(t => {
-    const etas = (state.etas[t.board] || []).slice().sort((a, b) => a.minutes - b.minutes).slice(0, 3);
+    const etas = (state.etas[t.board] || []).slice()
+      .sort((a, b) => Number(a.minutes) - Number(b.minutes)).slice(0, 3);
     const rows = etas.map(e => {
+      const eid = String(e.equipmentID || '');
+      const mins = Number(e.minutes) || 0; // coerce: sole numeric API field reaching HTML
       const away = stopsAway(e, t.board);
-      const lateFlag = e.statuscolor && e.statuscolor.toUpperCase() !== '#000000' && e.schedule !== e.time;
-      const destEta = (state.etas[t.dest] || []).find(d => String(d.equipmentID) === String(e.equipmentID) && d.minutes > e.minutes);
-      const slack = e.minutes - t.walkMin; // minutes to spare after walking
+      // late = prediction ≥2 min behind schedule (vendor statuscolor is unreliable)
+      const schedM = timeToMin(e.schedule), predM = timeToMin(e.time);
+      let diff = schedM != null && predM != null ? predM - schedM : 0;
+      if (diff < -720) diff += 1440; else if (diff > 720) diff -= 1440;
+      const lateFlag = diff >= 2;
+      const destEta = eid && eid !== '-'
+        ? (state.etas[t.dest] || []).find(d => String(d.equipmentID) === eid && Number(d.minutes) > mins)
+        : null;
+      const slack = mins - t.walkMin; // minutes to spare after walking
       const status = slack < 0 ? 'missed' : slack <= GO_WINDOW ? 'go' : 'wait';
       // the leave-now hint only makes sense on a near horizon
-      const pill = e.minutes > 90 ? '' : status === 'go' ? '<span class="pill go">Leave now</span>'
+      const pill = mins > 90 ? '' : status === 'go' ? '<span class="pill go">Leave now</span>'
         : status === 'wait' ? `<span class="pill wait">Leave in ~${slack} min</span>`
         : '<span class="pill missed">Too late</span>';
       const meta = [
-        destEta ? `arrives ~${destEta.time}` : '',
-        lateFlag ? `<span class="late">late (sched ${e.schedule})</span>` : '',
-        e.equipmentID && e.equipmentID !== '-' ? `Bus ${e.equipmentID}` : '',
+        away != null ? `~${away} stop${away === 1 ? '' : 's'} away` : '',
+        destEta ? `arrives ~${esc(destEta.time)}` : '',
+        lateFlag ? `<span class="late">late (sched ${esc(e.schedule)})</span>` : '',
+        eid && eid !== '-' ? `Bus ${esc(eid)}` : '',
       ].filter(Boolean).join(' · ');
       return `<div class="eta-row ${status === 'missed' ? 'missed' : ''}">
         <div class="eta-mid">
-          <div class="dir">${pill} Board ${e.time}${away != null ? ` · ~${away} stop${away === 1 ? '' : 's'} away` : ''}</div>
+          <div class="dir">${pill} Board ${esc(e.time)}</div>
           ${meta ? `<div class="meta">${meta}</div>` : ''}
         </div>
-        <div class="eta-min">${e.minutes <= 0 ? '<b class="now">Due</b>' : `<b>${e.minutes}</b><span>min</span>`}</div>
+        <div class="eta-min">${mins <= 0 ? '<b class="now">Due</b>' : `<b>${mins}</b><span>min</span>`}</div>
       </div>`;
     }).join('');
     let empty = '';
@@ -269,7 +362,7 @@ function render() {
       empty = `<div class="empty">${
         !span ? 'No buses right now.'
         : span.none ? 'No Route 6 service today.'
-        : `No buses right now · today: first ${span.first} · last ${span.last}`
+        : `No buses right now · today: first ${esc(span.first)} · last ${esc(span.last)}`
       }</div>`;
     }
     let lastTag = '';
@@ -278,17 +371,22 @@ function render() {
       if (span && !span.none) {
         const now = new Date(); const nowM = now.getHours() * 60 + now.getMinutes();
         const soon = span.lastM - nowM > 0 && span.lastM - nowM <= 60;
-        lastTag = ` · <span class="${soon ? 'soon' : ''}">last ${span.last}</span>`;
+        lastTag = ` · <span class="${soon ? 'soon' : ''}">last ${esc(span.last)}</span>`;
       }
     }
     return `<div class="card">
       <div class="trip-head">
-        <span class="trip-label">${t.icon} ${t.label}</span>
+        <h2 class="trip-label">${t.icon} ${t.label}</h2>
         <span class="trip-sub">${t.boardName} → ${t.destName} · ${t.walkMin} min walk${lastTag}</span>
       </div>
       ${rows || empty}
     </div>`;
   }).join('');
+}
+
+function safeRender() {
+  try { render(); return true; }
+  catch (e) { console.error('render failed', e); return false; }
 }
 
 function renderAge() {
@@ -311,12 +409,18 @@ const WMO = c =>
   : c <= 77 ? ['🌨', 'Snow'] : c <= 82 ? ['🌦', 'Showers'] : c <= 86 ? ['🌨', 'Snow showers']
   : ['⛈', 'Thunderstorm'];
 const isSnow = c => (c >= 71 && c <= 77) || c === 85 || c === 86;
+const fmt12 = hm => {
+  const [h, m] = hm.split(':').map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')}${h >= 12 ? 'PM' : 'AM'}`;
+};
 
 async function loadWeather() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 12000);
   try {
-    const r = await fetch(WX_URL);
+    const r = await fetch(WX_URL, { signal: ctl.signal });
+    if (!r.ok) throw new Error('wx http ' + r.status);
     const w = await r.json();
-    wxFetched = Date.now();
     const [icon, label] = WMO(w.current.weather_code);
     const lo = Math.round(w.daily.temperature_2m_min[0]), hi = Math.round(w.daily.temperature_2m_max[0]);
     // departure window: this hour + next 2 (indexed off the API's own local clock)
@@ -326,7 +430,7 @@ async function loadWeather() {
     const wetAt = win.find(i =>
       w.hourly.precipitation_probability[i] >= 40 || w.hourly.precipitation[i] >= 0.3 || w.hourly.weather_code[i] >= 51);
     if (wetAt != null) {
-      const at = w.hourly.time[wetAt].slice(11, 16);
+      const at = fmt12(w.hourly.time[wetAt].slice(11, 16));
       const code = w.hourly.weather_code[wetAt];
       const heavy = code >= 95 || code === 65 || code === 67 || code === 82 || w.hourly.precipitation[wetAt] >= 4;
       advice = isSnow(code)
@@ -335,10 +439,12 @@ async function loadWeather() {
         ? `<span class="advice bad">⛈ Heavy rain around ${at} — consider waiting</span>`
         : `<span class="advice warn">☔ Rain likely around ${at} — bring an umbrella</span>`;
     }
-    $('#wx').innerHTML = `<span class="now">${icon} ${Math.round(w.current.temperature_2m)}°</span>`
+    $('#wx').innerHTML = `<span class="now">${icon} ${Math.round(w.current.temperature_2m)}°C</span>`
       + `<span>${label}</span><span>${lo}–${hi}°C today</span>${advice}`;
     $('#wx').hidden = false;
+    wxFetched = Date.now(); // only after a fully successful render
   } catch { /* weather is best-effort; hide on failure */ $('#wx').hidden = true; }
+  finally { clearTimeout(timer); }
 }
 
 $('#refreshBtn').addEventListener('click', refresh);
@@ -348,19 +454,27 @@ document.addEventListener('visibilitychange', () => {
   if (Date.now() - wxFetched > 15 * 60e3) loadWeather();
 });
 
-(async () => {
-  try {
-    await loadStatic();
-  } catch (e) {
-    $('#board').innerHTML = '<p class="notice">⚠️ Can’t load route data — check your connection and reload.</p>';
-    return;
-  }
+(() => {
+  // paint ASAP: live ETAs don't wait for version/static/schedule lookups
+  const verP = getVersion()
+    .then(v => { if (v) feedVer = v; return loadStatic(); })
+    .then(safeRender).catch(() => {});
   loadWeather();
-  loadSchedules(); // timetable also feeds the always-on "last bus" tag
-  await refresh();
+  refresh();
+  verP.then(() => loadSchedules());
   setInterval(refresh, 20000);
   setInterval(loadWeather, 15 * 60e3);
   setInterval(renderAge, 1000);
+  // seasonal service change: re-check the feed version every 6 h while resident
+  setInterval(() => {
+    getVersion().then(v => {
+      if (!v) return;
+      if (feedVer && v !== feedVer) {
+        feedVer = v; state.sched = null; schedRetryAt = 0;
+        loadStatic().then(() => { loadSchedules(); safeRender(); });
+      } else if (!feedVer) feedVer = v;
+    }).catch(() => {});
+  }, 6 * 3600e3);
 })();
 </script>
 </body>
