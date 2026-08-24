@@ -131,18 +131,36 @@ footer { text-align: center; font-size: 11.5px; color: var(--muted); padding-top
 'use strict';
 const API = 'https://bloomingtontransit.etaspot.net/service.php';
 const TOKEN = 'TESTING';
-const ROUTE = 6; // internal route id of "6 Campus Shuttle"
+// BT re-numbers ALL internal ids (routes, stops, even extIDs) at every seasonal
+// service change, so nothing numeric is hardcoded: the route is resolved by its
+// public number and the stops by their full names, per dataset version.
+const ROUTE_ABBR = '6'; // "6 Campus Shuttle"
 const TRIPS = [
-  { icon: '🏫', label: 'To campus', board: 320, dest: 326, boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10 },
-  { icon: '🏠', label: 'Back home', board: 674, dest: 780, boardName: 'Woodlawn & 10th', destName: 'Scholars Quad',     walkMin: 5, showLast: true },
+  { icon: '🏫', label: 'To campus',
+    boardStop: '10th St & SR 45/46 @ UITS', destStop: '10th St & Forrest Ave @ Geology and Informatics',
+    boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10 },
+  { icon: '🏠', label: 'Back home',
+    boardStop: 'Woodlawn Ave and 10th St at Woodlawn Field', destStop: '10th St @ Scholars Quad Apts',
+    boardName: 'Woodlawn & 10th', destName: 'Scholars Quad', walkMin: 5, showLast: true },
 ];
-const STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
-const BOARD_IDS = new Set(TRIPS.map(t => t.board));
+let STOP_IDS = [];
+let BOARD_IDS = new Set();
+function resolveTrips() {
+  const byName = new Map(state.stops.map(s => [String(s.name).trim().toLowerCase(), Number(s.id)]));
+  for (const t of TRIPS) {
+    t.board = byName.get(t.boardStop.toLowerCase());
+    t.dest = byName.get(t.destStop.toLowerCase());
+  }
+  if (!TRIPS.every(t => t.board && t.dest)) return false;
+  STOP_IDS = [...new Set(TRIPS.flatMap(t => [t.board, t.dest]))];
+  BOARD_IDS = new Set(TRIPS.map(t => t.board));
+  return true;
+}
 const GO_WINDOW = 2; // "leave now" when bus arrives within walkMin .. walkMin+2
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-const state = { stopById: new Map(), patterns: [], vehicles: [], etas: {}, alerts: [], sched: null, lastOk: 0, offline: false };
+const state = { routeId: null, stops: [], stopById: new Map(), patterns: [], vehicles: [], etas: {}, alerts: [], sched: null, lastOk: 0, offline: false };
 let feedVer = null;       // ETA SPOT dataset version, used to invalidate caches on service changes
 let refreshing = false;
 let schedBusy = false, schedRetryAt = 0, schedDelay = 10 * 60e3;
@@ -182,24 +200,31 @@ async function getVersion() {
 // never fatal: live ETAs work without static data (stops-away just disappears),
 // and refresh() retries this in the background once the network is back.
 async function loadStatic() {
-  let c = readCache('bt6_static');
-  const valid = c && Array.isArray(c.stops) && Array.isArray(c.patterns);
+  let c = readCache('bt6_static2');
+  const valid = c && c.routeId != null && Array.isArray(c.stops) && Array.isArray(c.patterns);
   if (!valid || !cacheFresh(c, 24 * 3600e3)) {
     try {
-      const [stops, patterns] = await Promise.all([call('get_stops'), call('get_patterns')]);
+      const [routes, stops, patterns] = await Promise.all([call('get_routes'), call('get_stops'), call('get_patterns')]);
+      const route = routes.find(r => String(r.abbr).trim() === ROUTE_ABBR);
+      if (!route) throw new Error('route not in dataset');
+      const rid = Number(route.id);
       c = {
-        ts: Date.now(), ver: feedVer,
-        stops: stops.filter(s => Number(s.rid) === ROUTE),
-        patterns: patterns.filter(p => (p.routes || []).some(r => Number(r) === ROUTE))
+        ts: Date.now(), ver: feedVer, routeId: rid,
+        stops: stops.filter(s => Number(s.rid) === rid),
+        patterns: patterns.filter(p => (p.routes || []).some(r => Number(r) === rid))
           .map(p => ({ ...p, stopIDs: (p.stopIDs || []).map(Number) })),
       };
-      try { localStorage.setItem('bt6_static', JSON.stringify(c)); } catch {}
+      try { localStorage.setItem('bt6_static2', JSON.stringify(c)); } catch {}
     } catch {
-      if (!valid) c = { stops: [], patterns: [] }; // degrade: board still works
+      if (!valid) c = { routeId: null, stops: [], patterns: [] }; // degrade: retried from refresh()
     }
   }
+  state.routeId = c.routeId != null ? Number(c.routeId) : null;
+  state.stops = c.stops || [];
   state.patterns = (c.patterns || []).filter(p => Array.isArray(p.stopIDs));
-  state.stopById = new Map((c.stops || []).map(s => [Number(s.id), s]));
+  state.stopById = new Map(state.stops.map(s => [Number(s.id), s]));
+  resolveTrips();
+  mapBuilt = false; // route geometry may have changed with the dataset
 }
 
 // Route-6 timetable rows for our stops (first/last bus). ~4 MB, so: fetched only
@@ -212,7 +237,7 @@ const timeToMin = t => {
   return h * 60 + +m[2];
 };
 async function loadSchedules() {
-  if (state.sched || schedBusy || Date.now() < schedRetryAt) return;
+  if (!STOP_IDS.length || state.sched || schedBusy || Date.now() < schedRetryAt) return;
   const c = readCache('bt6_sched');
   if (c && c.byStop && Object.keys(c.byStop).length && cacheFresh(c, 7 * 24 * 3600e3)) {
     state.sched = c.byStop; safeRender(); return;
@@ -224,7 +249,7 @@ async function loadSchedules() {
     const byStop = {};
     for (const r of rows) {
       if (!STOP_IDS.includes(Number(r.stationID))) continue;
-      if (String(r.scheduleName || '').split(' - ')[0].trim() !== String(ROUTE)) continue;
+      if (String(r.scheduleName || '').split(' - ')[0].trim() !== ROUTE_ABBR) continue;
       const min = timeToMin(r.stopTime);
       if (min == null) continue;
       (byStop[r.stationID] = byStop[r.stationID] || []).push({ d: String(r.weekdays || ''), t: r.stopTime, m: min });
@@ -251,6 +276,14 @@ function todayServiceSpan(stopId) {
 // staleness clock and offline banner key off the BOARDING stops (the ones that
 // matter); try/finally guarantees the in-flight lock always releases.
 async function refresh() {
+  if (!STOP_IDS.length) {
+    // stops not resolved yet (cold or offline boot) — nothing to poll; retry static
+    if (Date.now() > staticNextTry) {
+      staticNextTry = Date.now() + 60e3;
+      getVersion().then(v => { if (v) feedVer = v; return loadStatic(); }).then(safeRender).catch(() => {});
+    }
+    return;
+  }
   if (refreshing) return;
   refreshing = true;
   $('#refreshBtn').innerHTML = '<span class="spin">⟳</span>';
@@ -267,7 +300,7 @@ async function refresh() {
       const r = etaResults[i];
       if (r.status !== 'fulfilled' || !Array.isArray(r.value)) return;
       const en = r.value[0] && r.value[0].enRoute;
-      state.etas[id] = (Array.isArray(en) ? en : []).filter(e => Number(e.routeID) === ROUTE);
+      state.etas[id] = (Array.isArray(en) ? en : []).filter(e => Number(e.routeID) === state.routeId);
       if (BOARD_IDS.has(id)) boardOk = true;
     });
     state.offline = !boardOk;
@@ -365,7 +398,7 @@ function buildMap() {
     const [x, y] = mapProj(s.lat, s.lng);
     html += `<circle class="map-mystop" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5"/>`;
   }
-  const home = state.stopById.get(320), campus = state.stopById.get(326);
+  const home = state.stopById.get(Number(TRIPS[0].board)), campus = state.stopById.get(Number(TRIPS[0].dest));
   if (home) { const [x, y] = mapProj(home.lat, home.lng); html += `<text class="map-label" x="${(x + 4).toFixed(1)}" y="${(y - 9).toFixed(1)}">Home</text>`; }
   if (campus) { const [x, y] = mapProj(campus.lat, campus.lng); html += `<text class="map-label" x="${(x - 4).toFixed(1)}" y="${(y - 9).toFixed(1)}" text-anchor="end">Luddy</text>`; }
   html += '<g id="busLayer"></g>';
@@ -376,7 +409,7 @@ function buildMap() {
 function drawBuses() {
   if (!mapBuilt || !mapProj) return;
   const box = $('#map').viewBox.baseVal;
-  const buses = state.vehicles.filter(v => Number(v.routeID) === ROUTE);
+  const buses = state.vehicles.filter(v => Number(v.routeID) === state.routeId);
   $('#busLayer').innerHTML = buses.map(v => {
     const [x, y] = mapProj(Number(v.lat), Number(v.lng));
     if (x < -20 || y < -20 || x > box.width + 20 || y > box.height + 20) return ''; // off-route (depot etc.)
@@ -390,25 +423,38 @@ function drawBuses() {
     : 'no buses on the road right now';
 }
 
-// Announcement schema is unobserved (feed was empty when built) — extract text
-// defensively; everything API-sourced is HTML-escaped before rendering.
-const alertText = a => {
-  if (typeof a === 'string') return a;
-  if (a && typeof a === 'object') {
-    for (const k of ['title', 'name', 'message', 'text', 'announcement', 'description']) {
-      if (typeof a[k] === 'string' && a[k].trim()) return a[k];
+// Announcements arrive as groups: {type, announcements: [{text, start, end,
+// cause, effect, affectedRoutes?}]}. Only route-relevant (or system-wide) ones
+// are shown; extraction stays defensive against future shape changes and all
+// API strings are HTML-escaped at the sink.
+function alertTexts(raw) {
+  const out = [];
+  for (const g of Array.isArray(raw) ? raw : []) {
+    if (typeof g === 'string') { if (g.trim()) out.push(g.trim()); continue; }
+    const anns = Array.isArray(g && g.announcements) ? g.announcements : [g];
+    for (const a of anns) {
+      if (typeof a === 'string') { if (a.trim()) out.push(a.trim()); continue; }
+      if (!a || typeof a !== 'object') continue;
+      if (Array.isArray(a.affectedRoutes) && a.affectedRoutes.length
+          && !a.affectedRoutes.some(r => Number(r && r.routeID) === state.routeId)) continue;
+      const t = [a.text, a.title, a.message, a.announcement, a.description]
+        .find(v => typeof v === 'string' && v.trim());
+      if (t) out.push(t.trim());
     }
-    const strs = Object.values(a).filter(v => typeof v === 'string' && v.trim());
-    if (strs.length) return strs.join(' — ');
   }
-  return '';
-};
+  return out;
+}
 
 function render() {
   // only touch the aria-live region when content actually changed
-  const alertsHTML = state.alerts.map(alertText).filter(Boolean)
+  const alertsHTML = alertTexts(state.alerts)
     .map(t => `<div class="alert">📢 ${esc(t)}</div>`).join('');
   if (alertsHTML !== lastAlertsHTML) { $('#alerts').innerHTML = alertsHTML; lastAlertsHTML = alertsHTML; }
+
+  if (!STOP_IDS.length) {
+    $('#board').innerHTML = '<p class="notice">Loading route data…</p>';
+    return;
+  }
 
   $('#board').innerHTML = TRIPS.map(t => {
     const etas = (state.etas[t.board] || []).slice()
@@ -546,14 +592,14 @@ document.addEventListener('visibilitychange', () => {
   if (Date.now() - wxFetched > 15 * 60e3) loadWeather();
 });
 
-(() => {
-  // paint ASAP: live ETAs don't wait for version/static/schedule lookups
-  const verP = getVersion()
-    .then(v => { if (v) feedVer = v; return loadStatic(); })
-    .then(safeRender).catch(() => {});
+(async () => {
   loadWeather();
+  // resolve ids first (instant when the version-keyed cache is warm), then poll
+  try { const v = await Promise.race([getVersion(), new Promise(res => setTimeout(() => res(null), 2500))]); if (v) feedVer = v; } catch {}
+  await loadStatic();
+  safeRender();
   refresh();
-  verP.then(() => loadSchedules());
+  loadSchedules();
   setInterval(refresh, 20000);
   setInterval(loadWeather, 15 * 60e3);
   setInterval(renderAge, 1000);
