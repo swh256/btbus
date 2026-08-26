@@ -138,7 +138,7 @@ const ROUTE_ABBR = '6'; // "6 Campus Shuttle"
 const TRIPS = [
   { icon: '🏫', label: 'To campus',
     boardStop: '10th St & SR 45/46 @ UITS', destStop: '10th St & Forrest Ave @ Geology and Informatics',
-    boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10 },
+    boardName: '10th & SR 45/46', destName: '10th & Forrest Ave', walkMin: 10, showFirst: true },
   { icon: '🏠', label: 'Back home',
     boardStop: 'Woodlawn Ave and 10th St at Woodlawn Field', destStop: '10th St @ Scholars Quad Apts',
     boardName: 'Woodlawn & 10th', destName: 'Scholars Quad', walkMin: 5, showLast: true },
@@ -269,7 +269,7 @@ function todayServiceSpan(stopId) {
   const c = day === 0 ? '7' : String(day);
   const rows = (state.sched[stopId] || []).filter(r => r.d.includes(c)).sort((a, b) => a.m - b.m);
   if (!rows.length) return { none: true };
-  return { first: rows[0].t, last: rows[rows.length - 1].t, lastM: rows[rows.length - 1].m };
+  return { first: rows[0].t, firstM: rows[0].m, last: rows[rows.length - 1].t, lastM: rows[rows.length - 1].m };
 }
 
 // Partial results are kept: each response updates its own slice of state; the
@@ -500,13 +500,18 @@ function render() {
         : `No buses right now · today: first ${esc(span.first)} · last ${esc(span.last)}`
       }</div>`;
     }
+    // outbound card carries today's first bus, homebound card the last one;
+    // highlighted while it is the number that decides your next move
     let lastTag = '';
-    if (t.showLast) {
-      const span = todayServiceSpan(t.board);
-      if (span && !span.none) {
-        const now = new Date(); const nowM = now.getHours() * 60 + now.getMinutes();
-        const soon = span.lastM - nowM > 0 && span.lastM - nowM <= 60;
-        lastTag = ` · <span class="${soon ? 'soon' : ''}">last ${esc(span.last)}</span>`;
+    const svc = (t.showFirst || t.showLast) ? todayServiceSpan(t.board) : null;
+    if (svc && !svc.none) {
+      const now = new Date(); const nowM = now.getHours() * 60 + now.getMinutes();
+      if (t.showFirst) {
+        const notYet = nowM < svc.firstM; // service hasn't started for the day
+        lastTag = ` · <span class="${notYet ? 'soon' : ''}">first ${esc(svc.first)}</span>`;
+      } else {
+        const soon = svc.lastM - nowM > 0 && svc.lastM - nowM <= 60;
+        lastTag = ` · <span class="${soon ? 'soon' : ''}">last ${esc(svc.last)}</span>`;
       }
     }
     return `<div class="card">
